@@ -9,10 +9,11 @@ Payara Eclipselink Build script
 Usage: $0 <command>
 
 Where command is:
-   prepare  Creates required direcory $HOME/extension.lib.external, downloads and unpacks required libs
-   compile  Obviously  
-   install  To install compilation result to your maven repo
-   deploy   To deploy the compilation result into patched projects repo
+   prepare          Creates required direcory $HOME/extension.lib.external, downloads and unpacks required libs
+   compile          Obviously
+   install          To install compilation result to your maven repo (RELEASE version)
+   snapshot-install To install a SNAPSHOT version to your local maven repo (adds -SNAPSHOT suffix, skips signing)
+   deploy           To deploy the compilation result into patched projects repo
 
 The tool will determine the correct version automatically no furger arguments are needed (or implemented)
 
@@ -53,15 +54,75 @@ install() {
      TARGET=$1
    fi
    rm pom.xml # That one is just temporary created during uploads
-   
+
    # rename asm files, their name from compile are different than required by install
    ASM_VERSION=`grep 'eclipselink.asm.version' buildsystem/compdeps/pom.xml | head -1 | awk 'match($0, /.*[>]([0-9.]+)[<].*/, v) {print v[1]}'`
    echo "ASM_VERSION = ${ASM_VERSION}"
    mv plugins/org.eclipse.persistence.asm-sources.jar plugins/org.eclipse.persistence.asm.source_${ASM_VERSION}.jar
    mv plugins/org.eclipse.persistence.asm.jar plugins/org.eclipse.persistence.asm_${ASM_VERSION}.jar
-   
+
    $MVN dependency:copy -Dartifact=org.apache.maven:maven-ant-tasks:2.0.8:jar -DoutputDirectory=target/
-   $ANT -f uploadToMaven.xml -Dmavenant.dir=target/ -Drelease.version=$VERSION -Dbuild.type=RELEASE -Dgit.hash=`git rev-parse --short HEAD` -Dversion.string=$VERSION -Dmaven.repo.dir=$TARGET -Dasm.version=${ASM_VERSION}  
+   $ANT -f uploadToMaven.xml -Dmavenant.dir=target/ -Drelease.version=$VERSION -Dbuild.type=RELEASE -Dgit.hash=`git rev-parse --short HEAD` -Dversion.string=$VERSION -Dmaven.repo.dir=$TARGET -Dasm.version=${ASM_VERSION}
+}
+
+# Installs a SNAPSHOT version to the local Maven repository (~/.m2).
+# Produces version: ${release.version}.payara-p${PATCH_VERSION}-SNAPSHOT
+# e.g. 2.7.16.payara-p2-SNAPSHOT
+#
+# Uses mvn install:install-file directly instead of uploadToMaven.xml + maven-ant-tasks,
+# because maven-ant-tasks-2.0.8 is incompatible with Ant 1.10+ / Java 11+ and produces:
+#   "Target 'from' does not exist in the project 'Upload2Maven'"
+snapshot-install() {
+   local MVN_VERSION="${VERSION}-SNAPSHOT"
+   local PLUGINS_DIR="$PWD/plugins"
+   local GROUP="org.eclipse.persistence"
+
+   echo "Installing EclipseLink ${MVN_VERSION} to local Maven repository..."
+
+   local INSTALLED=0
+   local SKIPPED=0
+
+   # Iterate over every versioned jar in plugins/ for this build.
+   # Filename format: {artifactId}_{version}.jar
+   # Source format:   {artifactId}.source_{version}.jar  (skipped here, attached below)
+   for JAR in "${PLUGINS_DIR}"/*_${VERSION}.jar; do
+      [[ -f "$JAR" ]] || continue
+      local BASENAME
+      BASENAME=$(basename "$JAR")
+      local ART="${BASENAME%_${VERSION}.jar}"
+
+      # Skip the OSGi source bundles — they are installed as classifier=sources below
+      [[ "$ART" == *.source ]] && continue
+
+      local SRC="${PLUGINS_DIR}/${ART}.source_${VERSION}.jar"
+
+      echo "  [install] ${GROUP}:${ART}:${MVN_VERSION}"
+      $MVN install:install-file \
+         -Dfile="$JAR" \
+         -DgroupId="$GROUP" \
+         -DartifactId="$ART" \
+         -Dversion="$MVN_VERSION" \
+         -Dpackaging=jar \
+         -DgeneratePom=true \
+         -q && INSTALLED=$((INSTALLED + 1)) || SKIPPED=$((SKIPPED + 1))
+
+      # Attach sources jar if it exists
+      if [[ -f "$SRC" ]]; then
+         $MVN install:install-file \
+            -Dfile="$SRC" \
+            -DgroupId="$GROUP" \
+            -DartifactId="$ART" \
+            -Dversion="$MVN_VERSION" \
+            -Dpackaging=jar \
+            -Dclassifier=sources \
+            -DgeneratePom=false \
+            -q
+      fi
+   done
+
+   echo ""
+   echo "Done. Installed ${INSTALLED} artifact(s) as ${MVN_VERSION} (${SKIPPED} failed)."
+   echo "Verify: find ~/.m2/repository/org/eclipse/persistence -name \"*${MVN_VERSION}*\" | sort"
 }
 
 deploy() {
@@ -176,6 +237,10 @@ case "$CMD" in
 
    prepare)
       prepare
+      ;;
+
+   snapshot-install)
+      snapshot-install
       ;;
 
    snapshot)
