@@ -25,6 +25,7 @@ import org.eclipse.persistence.descriptors.ClassDescriptor;
 import org.eclipse.persistence.descriptors.changetracking.CollectionChangeEvent;
 import org.eclipse.persistence.exceptions.ValidationException;
 import org.eclipse.persistence.internal.queries.ContainerPolicy;
+import org.eclipse.persistence.logging.SessionLog;
 
 /**
  * <p>
@@ -146,7 +147,38 @@ public class CollectionChangeRecord extends DeferrableChangeRecord implements or
 
         for (Integer index : indicesToRemove) {
             Object object = objectChanges.get(index);
-            ObjectChangeSet change = session.getDescriptor(object.getClass()).getObjectBuilder().createObjectChangeSet(object, changeSet, session);
+
+            if (object == null) {
+                // Null in the backup list indicates a cluster cache desync: an object added via a
+                // JPA lifecycle callback (@PrePersist/@PreUpdate) after the changeset was already
+                // built was replicated to other cluster nodes without a valid cache key (→ null).
+                if (session.shouldLog(SessionLog.WARNING, SessionLog.TRANSACTION)) {
+                    session.log(SessionLog.WARNING, SessionLog.TRANSACTION,
+                            "addOrderedRemoveChange: null object at index [{0}] in collection for mapping [{1}] " +
+                                    "on descriptor [{2}]. Possible cause: a JPA lifecycle callback modified a collection " +
+                                    "after the changeset was built and the change was replicated as null to other cluster " +
+                                    "nodes. Skipping entry.", new Object[]{index,
+                                    this.mapping != null ? this.mapping.getAttributeName() : "unknown",
+                                    this.mapping != null && this.mapping.getDescriptor() != null
+                                            ? this.mapping.getDescriptor().getJavaClassName() : "unknown"});
+                }
+                continue;
+            }
+
+            ClassDescriptor descriptor = session.getDescriptor(object.getClass());
+
+            if (descriptor == null) {
+                if (session.shouldLog(SessionLog.WARNING, SessionLog.TRANSACTION)) {
+                    session.log(SessionLog.WARNING, SessionLog.TRANSACTION,
+                            "addOrderedRemoveChange: no descriptor registered for class [{0}] at index [{1}] " +
+                                    "in mapping [{2}]. Skipping entry.", new Object[]{
+                                    object.getClass().getName(), index,
+                                    this.mapping != null ? this.mapping.getAttributeName() : "unknown"});
+                }
+                continue;
+            }
+
+            ObjectChangeSet change = descriptor.getObjectBuilder().createObjectChangeSet(object, changeSet, session);
             getOrderedRemoveObjects().put(index, change);
         }
     }
