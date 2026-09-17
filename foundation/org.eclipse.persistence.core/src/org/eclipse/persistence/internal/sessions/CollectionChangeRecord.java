@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 1998, 2018 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2026 Payara Foundation and/or its affiliates.
  *
  * This program and the accompanying materials are made available under the
  * terms of the Eclipse Public License v. 2.0 which is available at
@@ -154,13 +155,21 @@ public class CollectionChangeRecord extends DeferrableChangeRecord implements or
                 // built was replicated to other cluster nodes without a valid cache key (→ null).
                 if (session.shouldLog(SessionLog.WARNING, SessionLog.TRANSACTION)) {
                     session.log(SessionLog.WARNING, SessionLog.TRANSACTION,
-                            "addOrderedRemoveChange: null object at index [{0}] in collection for mapping [{1}] " +
-                                    "on descriptor [{2}]. Possible cause: a JPA lifecycle callback modified a collection " +
-                                    "after the changeset was built and the change was replicated as null to other cluster " +
-                                    "nodes. Skipping entry.", new Object[]{index,
+                            "addOrderedRemoveChange: null object at index [{0}] of [{1}] indices to remove." +
+                                    " Owner entity: [{2}] id=[{3}]." +
+                                    " Collection attribute: [{4}]." +
+                                    " Collection element type (inferred from non-null entries): [{5}]." +
+                                    " Probable cause: a @PrePersist/@PreUpdate JPA lifecycle callback modified this" +
+                                    " collection after the changeset was built; the unpersisted element was replicated" +
+                                    " to other cluster nodes without a valid cache key (stored as null). Skipping entry.",
+                            new Object[]{
+                                    index,
+                                    indicesToRemove.size(),
+                                    this.owner != null ? this.owner.getClassName() : "unknown",
+                                    this.owner != null ? this.owner.getId() : "unknown",
                                     this.mapping != null ? this.mapping.getAttributeName() : "unknown",
-                                    this.mapping != null && this.mapping.getDescriptor() != null
-                                            ? this.mapping.getDescriptor().getJavaClassName() : "unknown"});
+                                    inferElementTypeFromMap(objectChanges)
+                            });
                 }
                 continue;
             }
@@ -170,10 +179,16 @@ public class CollectionChangeRecord extends DeferrableChangeRecord implements or
             if (descriptor == null) {
                 if (session.shouldLog(SessionLog.WARNING, SessionLog.TRANSACTION)) {
                     session.log(SessionLog.WARNING, SessionLog.TRANSACTION,
-                            "addOrderedRemoveChange: no descriptor registered for class [{0}] at index [{1}] " +
-                                    "in mapping [{2}]. Skipping entry.", new Object[]{
-                                    object.getClass().getName(), index,
-                                    this.mapping != null ? this.mapping.getAttributeName() : "unknown"});
+                            "addOrderedRemoveChange: no descriptor registered for class [{0}] at index [{1}]." +
+                                    " Owner entity: [{2}] id=[{3}]." +
+                                    " Collection attribute: [{4}]. Skipping entry.",
+                            new Object[]{
+                                    object.getClass().getName(),
+                                    index,
+                                    this.owner != null ? this.owner.getClassName() : "unknown",
+                                    this.owner != null ? this.owner.getId() : "unknown",
+                                    this.mapping != null ? this.mapping.getAttributeName() : "unknown"
+                            });
                 }
                 continue;
             }
@@ -181,6 +196,19 @@ public class CollectionChangeRecord extends DeferrableChangeRecord implements or
             ObjectChangeSet change = descriptor.getObjectBuilder().createObjectChangeSet(object, changeSet, session);
             getOrderedRemoveObjects().put(index, change);
         }
+    }
+
+    /**
+     * Returns the class name of the first non-null value in the map, used to infer
+     * the collection element type when the null-guard log fires and this.mapping is unavailable.
+     */
+    private String inferElementTypeFromMap(Map objectChanges) {
+        for (Object value : objectChanges.values()) {
+            if (value != null) {
+                return value.getClass().getName();
+            }
+        }
+        return "unknown (all entries null)";
     }
 
     /**
