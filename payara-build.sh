@@ -19,6 +19,9 @@ Where command is:
 The tool will determine the correct version automatically no furger arguments are needed (or implemented)
 
 Environment:
+   JAVA_HOME       must point to JDK 17+ (Tycho 3.0.4 requires class file version 61.0;
+                   JDK 8 cannot load its classes and produces a cryptic Guice/P2 error)
+
    M2_HOME,
    ANT_HOME        pointing at respective tool installations
 
@@ -67,6 +70,87 @@ install() {
 
    $MVN dependency:copy -Dartifact=org.apache.maven:maven-ant-tasks:2.0.8:jar -DoutputDirectory=target/
    $ANT -f uploadToMaven.xml -Dmavenant.dir=target/ -Drelease.version=$VERSION -Dbuild.type=RELEASE -Dgit.hash=`git rev-parse --short HEAD` -Dversion.string=$VERSION -Dmaven.repo.dir=$TARGET -Dasm.version=${ASM_VERSION}
+}
+
+# Publishes two special-case artifacts that the generic *_${VERSION}.jar loop misses:
+#
+#   1. org.eclipse.persistence.antlr
+#      The ANTLR jar uses ANTLR's own OSGi version (e.g. antlr_3.5.3.v202311210849.jar),
+#      not the EclipseLink build version. uploadToMaven.xml discovers the file via
+#      <selectbundle> and then publishes it under the EclipseLink maven.version.
+#
+#   2. org.eclipse.persistence.jpa.modelgen.processor
+#      Same physical jar as jpa.modelgen but published under a different artifactId.
+#      uploadToMaven.xml uses the jpa.modelgen_${version.string}.jar file for both.
+#
+# Arguments: $1 = MVN_COMMAND (either "install:install-file -Dmaven.repo.local=..." or
+#            "deploy:deploy-file -Durl=... -DrepositoryId=..."), $2 = PLUGINS_DIR,
+#            $3 = MVN_VERSION
+publish_special_artifacts() {
+   local MVN_GOAL="$1"
+   local PLUGINS_DIR="$2"
+   local MVN_VERSION="$3"
+   local GROUP="org.eclipse.persistence"
+
+   # --- 1. ANTLR ---
+   local ANTLR_JAR
+   ANTLR_JAR=$(ls "${PLUGINS_DIR}"/org.eclipse.persistence.antlr_*.jar 2>/dev/null | grep -v source | head -1)
+   local ANTLR_SRC
+   ANTLR_SRC=$(ls "${PLUGINS_DIR}"/org.eclipse.persistence.antlr*.source_*.jar 2>/dev/null | head -1)
+
+   if [[ -f "$ANTLR_JAR" ]]; then
+      echo "  [special] ${GROUP}:org.eclipse.persistence.antlr:${MVN_VERSION}"
+      $MVN ${MVN_GOAL} \
+         -Dfile="$ANTLR_JAR" \
+         -DgroupId="$GROUP" \
+         -DartifactId="org.eclipse.persistence.antlr" \
+         -Dversion="$MVN_VERSION" \
+         -Dpackaging=jar \
+         -DgeneratePom=true \
+         -q
+      if [[ -f "$ANTLR_SRC" ]]; then
+         $MVN ${MVN_GOAL} \
+            -Dfile="$ANTLR_SRC" \
+            -DgroupId="$GROUP" \
+            -DartifactId="org.eclipse.persistence.antlr" \
+            -Dversion="$MVN_VERSION" \
+            -Dpackaging=jar \
+            -Dclassifier=sources \
+            -DgeneratePom=false \
+            -q
+      fi
+   else
+      echo "  [special] WARNING: org.eclipse.persistence.antlr jar not found in ${PLUGINS_DIR}"
+   fi
+
+   # --- 2. jpa.modelgen.processor (same jar as jpa.modelgen, different artifactId) ---
+   local MODELGEN_JAR="${PLUGINS_DIR}/org.eclipse.persistence.jpa.modelgen_${VERSION}.jar"
+   local MODELGEN_SRC="${PLUGINS_DIR}/org.eclipse.persistence.jpa.modelgen.source_${VERSION}.jar"
+
+   if [[ -f "$MODELGEN_JAR" ]]; then
+      echo "  [special] ${GROUP}:org.eclipse.persistence.jpa.modelgen.processor:${MVN_VERSION}"
+      $MVN ${MVN_GOAL} \
+         -Dfile="$MODELGEN_JAR" \
+         -DgroupId="$GROUP" \
+         -DartifactId="org.eclipse.persistence.jpa.modelgen.processor" \
+         -Dversion="$MVN_VERSION" \
+         -Dpackaging=jar \
+         -DgeneratePom=true \
+         -q
+      if [[ -f "$MODELGEN_SRC" ]]; then
+         $MVN ${MVN_GOAL} \
+            -Dfile="$MODELGEN_SRC" \
+            -DgroupId="$GROUP" \
+            -DartifactId="org.eclipse.persistence.jpa.modelgen.processor" \
+            -Dversion="$MVN_VERSION" \
+            -Dpackaging=jar \
+            -Dclassifier=sources \
+            -DgeneratePom=false \
+            -q
+      fi
+   else
+      echo "  [special] WARNING: org.eclipse.persistence.jpa.modelgen jar not found in ${PLUGINS_DIR}"
+   fi
 }
 
 # Installs a SNAPSHOT version to the local Maven repository (~/.m2).
@@ -123,6 +207,9 @@ snapshot-install() {
             -q
       fi
    done
+
+   # Publish special-case artifacts not covered by the generic loop
+   publish_special_artifacts "install:install-file" "$PLUGINS_DIR" "$MVN_VERSION"
 
    echo ""
    echo "Done. Installed ${INSTALLED} artifact(s) as ${MVN_VERSION} (${SKIPPED} failed)."
@@ -229,10 +316,27 @@ snapshot() {
       fi
    done
 
+   # Deploy special-case artifacts not covered by the generic loop
+   publish_special_artifacts \
+      "deploy:deploy-file -Durl=${NEXUS_URL} -DrepositoryId=${NEXUS_ID}" \
+      "$PLUGINS_DIR" \
+      "$MVN_VERSION"
+
    echo ""
    echo "Done. Deployed ${DEPLOYED} artifact(s) as ${MVN_VERSION} to Nexus (${FAILED} failed)."
    [[ $FAILED -gt 0 ]] && echo "  Tip: verify your settings.xml (${MAVEN_SETTINGS:-~/.m2/settings.xml}) has a <server id=\"${NEXUS_ID}\"> with valid credentials. Set MAVEN_SETTINGS to point at a custom settings file."
 }
+
+# Tycho 3.0.4 (used by the Maven sub-build spawned from Ant) requires Java 17+.
+# Its class files are compiled at level 61.0; Java 8 (level 52.0) cannot load them.
+# Fail early with a clear message rather than a cryptic Guice/Tycho class-loading error.
+JAVA_MAJOR=$(java -version 2>&1 | head -1 | awk -F'"' '{print $2}' | awk -F'.' '{if ($1=="1") print $2; else print $1}')
+if [[ -z "$JAVA_MAJOR" || "$JAVA_MAJOR" -lt 17 ]] ; then
+   echo "ERROR: Java 17 or higher is required (Tycho 3.0.4 uses class file version 61.0)."
+   echo "       Detected Java version: ${JAVA_MAJOR:-unknown}"
+   echo "       Set JAVA_HOME or use 'sdk use java <17-version>' to switch."
+   exit 1
+fi
 
 if [[ ! -d $M2_HOME ]] ; then
    usage
