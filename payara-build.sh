@@ -77,22 +77,28 @@ install() {
 #   1. org.eclipse.persistence.antlr
 #      The ANTLR jar uses ANTLR's own OSGi version (e.g. antlr_3.5.3.v202311210849.jar),
 #      not the EclipseLink build version. uploadToMaven.xml discovers the file via
-#      <selectbundle> and then publishes it under the EclipseLink maven.version.
+#      <selectbundle> and publishes it under the EclipseLink maven.version. No extra
+#      dependencies are needed (uploadToMaven.xml passes dependencies="").
 #
 #   2. org.eclipse.persistence.jpa.modelgen.processor
 #      Same physical jar as jpa.modelgen but published under a different artifactId.
-#      uploadToMaven.xml uses the jpa.modelgen_${version.string}.jar file for both.
+#      IMPORTANT: uploadToMaven.xml sets modelgen.dependencies = dep.core + dep.jpa,
+#      meaning its published POM must declare org.eclipse.persistence.core and
+#      org.eclipse.persistence.jpa as compile dependencies. Without these, Maven
+#      annotation processor classpaths are missing AbstractSession at build time,
+#      producing: NoClassDefFoundError: org/eclipse/persistence/internal/sessions/AbstractSession
+#      We generate a proper POM with these dependencies rather than using -DgeneratePom=true
+#      (which produces an empty-dependency POM and causes the above error).
 #
-# Arguments: $1 = MVN_COMMAND (either "install:install-file -Dmaven.repo.local=..." or
-#            "deploy:deploy-file -Durl=... -DrepositoryId=..."), $2 = PLUGINS_DIR,
-#            $3 = MVN_VERSION
+# Arguments: $1 = MVN_GOAL ("install:install-file" or "deploy:deploy-file -Durl=... -DrepositoryId=...")
+#            $2 = PLUGINS_DIR, $3 = MVN_VERSION
 publish_special_artifacts() {
    local MVN_GOAL="$1"
    local PLUGINS_DIR="$2"
    local MVN_VERSION="$3"
    local GROUP="org.eclipse.persistence"
 
-   # --- 1. ANTLR ---
+   # --- 1. ANTLR (no declared dependencies) ---
    local ANTLR_JAR
    ANTLR_JAR=$(ls "${PLUGINS_DIR}"/org.eclipse.persistence.antlr_*.jar 2>/dev/null | grep -v source | head -1)
    local ANTLR_SRC
@@ -124,19 +130,46 @@ publish_special_artifacts() {
    fi
 
    # --- 2. jpa.modelgen.processor (same jar as jpa.modelgen, different artifactId) ---
+   # Requires a hand-crafted POM declaring core + jpa as compile dependencies so that
+   # annotation processor classpaths include AbstractSession at consumer build time.
    local MODELGEN_JAR="${PLUGINS_DIR}/org.eclipse.persistence.jpa.modelgen_${VERSION}.jar"
    local MODELGEN_SRC="${PLUGINS_DIR}/org.eclipse.persistence.jpa.modelgen.source_${VERSION}.jar"
 
    if [[ -f "$MODELGEN_JAR" ]]; then
       echo "  [special] ${GROUP}:org.eclipse.persistence.jpa.modelgen.processor:${MVN_VERSION}"
+
+      local MODELGEN_POM
+      MODELGEN_POM=$(mktemp /tmp/modelgen-processor-pom.XXXXXX.xml)
+      cat > "$MODELGEN_POM" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>org.eclipse.persistence</groupId>
+  <artifactId>org.eclipse.persistence.jpa.modelgen.processor</artifactId>
+  <version>${MVN_VERSION}</version>
+  <packaging>jar</packaging>
+  <name>EclipseLink JPA Modelgen (non-OSGi)</name>
+  <dependencies>
+    <dependency>
+      <groupId>org.eclipse.persistence</groupId>
+      <artifactId>org.eclipse.persistence.core</artifactId>
+      <version>${MVN_VERSION}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.eclipse.persistence</groupId>
+      <artifactId>org.eclipse.persistence.jpa</artifactId>
+      <version>${MVN_VERSION}</version>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+
       $MVN ${MVN_GOAL} \
          -Dfile="$MODELGEN_JAR" \
-         -DgroupId="$GROUP" \
-         -DartifactId="org.eclipse.persistence.jpa.modelgen.processor" \
-         -Dversion="$MVN_VERSION" \
-         -Dpackaging=jar \
-         -DgeneratePom=true \
+         -DpomFile="$MODELGEN_POM" \
          -q
+      rm -f "$MODELGEN_POM"
+
       if [[ -f "$MODELGEN_SRC" ]]; then
          $MVN ${MVN_GOAL} \
             -Dfile="$MODELGEN_SRC" \
