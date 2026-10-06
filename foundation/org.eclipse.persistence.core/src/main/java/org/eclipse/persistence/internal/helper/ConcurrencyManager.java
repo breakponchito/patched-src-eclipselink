@@ -425,6 +425,9 @@ public class ConcurrencyManager implements Serializable {
      * Return the deferred lock manager from the thread
      */
     public static DeferredLockManager getDeferredLockManager(Thread thread) {
+        if (thread == null) {
+            return null;
+        }
         return getDeferredLockManagers().get(thread);
     }
 
